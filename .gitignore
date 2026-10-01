@@ -7,3 +7,5 @@ data/raw/
 *.duckdb
 *.duckdb.wal
 data/lakehouse/
+data/assistant_cache.jsonl
+*.log

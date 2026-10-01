@@ -6,9 +6,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import duckdb
+import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from retail import assistant
 from retail.config import WAREHOUSE
 
 
@@ -17,13 +19,20 @@ class BasketRequest(BaseModel):
     k: int = Field(default=10, ge=1, le=50)
 
 
+class AskRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=300, description="A question about sales, products or customers")
+
+
 def _rows(cursor: duckdb.DuckDBPyConnection) -> list[dict]:
     columns = [c[0] for c in cursor.description]
     return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 
-def create_app(source: Path | str | duckdb.DuckDBPyConnection = WAREHOUSE) -> FastAPI:
-    """`source` is the warehouse file, or an already open connection (used by the tests)."""
+def create_app(source: Path | str | duckdb.DuckDBPyConnection = WAREHOUSE, llm=None) -> FastAPI:
+    """`source` is the warehouse file, or an already open connection (used by the tests).
+
+    `llm` answers POST /ask; by default it is the model named by LLM_MODEL on the server at LLM_BASE_URL.
+    """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -33,7 +42,7 @@ def create_app(source: Path | str | duckdb.DuckDBPyConnection = WAREHOUSE) -> Fa
             return
         if not Path(source).exists():
             raise RuntimeError(f"{source} not found: run `python -m retail.pipeline` first")
-        app.state.conn = duckdb.connect(str(source), read_only=True)
+        app.state.conn = assistant.read_only_connection(source)
         yield
         app.state.conn.close()
 
@@ -105,6 +114,20 @@ def create_app(source: Path | str | duckdb.DuckDBPyConnection = WAREHOUSE) -> Fa
             GROUP BY n.neighbour, p.description
             ORDER BY score DESC, n.neighbour LIMIT $k""", {"items": items, "k": basket.k}))
         return {"basket": items, "recommendations": rows}
+
+    @app.post("/ask")
+    def ask(request: Request, body: AskRequest) -> dict:
+        """Plain-English question -> one checked, read-only SQL query -> rows. The query is always returned."""
+        try:
+            answer = assistant.ask(body.question, llm or assistant.ChatModel(), db(request))
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail=f"language model not reachable: {exc}") from exc
+        if answer.declined:
+            return {"question": body.question, "answered": False, "reason": "the question cannot be answered from the warehouse"}
+        if answer.error:
+            return {"question": body.question, "answered": False, "sql": answer.sql, "reason": answer.error}
+        return {"question": body.question, "answered": True, "sql": answer.sql, "attempts": answer.attempts,
+                "columns": answer.columns, "rows": [list(row) for row in answer.rows]}
 
     return app
 

@@ -3,10 +3,11 @@
 ![tests](https://github.com/S-Harshni/Retail-Intelligence-Platform/actions/workflows/ci.yml/badge.svg)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![sql](https://img.shields.io/badge/SQL-DuckDB-yellow)
+![llm](https://img.shields.io/badge/LLM-text--to--SQL-8a2be2)
 ![spark](https://img.shields.io/badge/PySpark-Delta_Lake-orange)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
-One million real retail transactions turned into a SQL warehouse, customer and returns analysis, a repeat-purchase model, demand forecasts, a stock simulation and product recommendations, served by an API and a dashboard.
+One million real retail transactions turned into a SQL warehouse, customer and returns analysis, a repeat-purchase model, demand forecasts, a stock simulation, product recommendations and a text-to-SQL assistant, served by an API and a dashboard.
 
 **Live demo:** https://s-harshni.github.io/Retail-Intelligence-Platform/
 
@@ -29,6 +30,7 @@ The converted file is in the repository ([`data/`](data/README.md)), so everythi
 | **Demand forecast** | How many units of each product next week, and over the next three? | [`forecasting.py`](src/retail/forecasting.py) |
 | **Inventory** | Does the better forecast buy the same service with less stock? | [`inventory.py`](src/retail/inventory.py) |
 | **Recommendations** | What is bought together with this product? | [`recommender.py`](src/retail/recommender.py) |
+| **SQL assistant** | Can a language model answer a plain-English question with a correct query? | [`assistant.py`](src/retail/assistant.py), [`assistant_eval.py`](src/retail/assistant_eval.py) |
 | **API** | Serve all of it over HTTP | [`api.py`](src/retail/api.py) (FastAPI) |
 
 ## Results
@@ -110,6 +112,29 @@ Item-to-item cosine similarity over order baskets, built from orders before 1 Se
 
 ![Recommendations](docs/img/recommendations.png)
 
+### SQL assistant (text-to-SQL with open-source language models)
+
+Ask a question in plain English; a language model writes one DuckDB query, which is checked, run read-only and returned with its result. Models run locally through Ollama (any OpenAI-compatible API works).
+
+Measured on **70 questions with hand-written reference queries** (look-ups, top-k, group by, dates, joins, ratios and window functions). An answer counts only if the model's query returns the same table as the reference query.
+
+| Set-up | Correct | Query ran |
+| --- | ---: | ---: |
+| **Voting across 3 models** (qwen2.5-coder:3b, llama3.2:3b, qwen2.5:3b) | **72.9%** | |
+| qwen2.5-coder:3b, six worked examples in the prompt | 61.4% | 87.1% |
+| llama3.2:3b, with examples | 60.0% | 82.9% |
+| qwen2.5-coder:3b, no examples | 47.1% | 87.1% |
+| qwen2.5:3b, with examples | 47.1% | 75.7% |
+| gemma2:2b, with examples | 45.7% | 64.3% |
+
+- **Prompting:** worked examples lift the code model from 47.1% to 61.4%. The prompt holds a plain-language description of nine tables and the business rules (what counts as a sale, an order, a return).
+- **Self-repair:** when the database rejects a query, the model sees the error once and may fix it. That rescued 3 of 70 answers.
+- **Voting:** every candidate query is run and the result most models agree on is kept. Two models rarely make the same mistake, which adds 11.5 points over the best single model.
+- **Safety:** the reply must be one `SELECT` over the published tables; a guard rejects anything that writes, reads files or touches other tables, and the connection itself is read-only with external access switched off. Of 10 requests that should not be answered (deleting data, data that does not exist), the best model declined 7, the checks stopped 3, and none was answered.
+- **Honest limits:** these are 2 to 3 billion parameter models on a laptop, and a query that runs is not always right (87% ran, 61% were right), so the generated SQL is always shown next to the answer. The prompt rules were revised once after a first run on these questions, so the figures are somewhat optimistic for unseen questions.
+
+![SQL assistant](docs/img/assistant.png)
+
 ## Lakehouse version (PySpark and Delta Lake)
 
 [`lakehouse.py`](src/retail/lakehouse.py) rebuilds the warehouse as a medallion lakehouse with **PySpark** jobs writing **Delta Lake** tables:
@@ -146,6 +171,7 @@ Model outputs are written back into the warehouse (`ml_customer_score`, `ml_fore
 | `GET /products/{code}` | Sales, return rate, latest forecasts, products bought together |
 | `GET /customers/{id}` | Segment, RFM scores, probability of ordering in the next 90 days |
 | `POST /recommendations` | Top-k products for a basket |
+| `POST /ask` | A plain-English question answered by a generated, checked SQL query (returned with the rows) |
 
 ## Run it
 
@@ -153,14 +179,15 @@ Model outputs are written back into the warehouse (`ml_customer_score`, `ml_fore
 make install       # virtual environment and dependencies
 make pipeline      # builds the warehouse, runs the models, writes docs/data/data.json (about a minute)
 make lakehouse     # optional: PySpark + Delta Lake bronze/silver/gold tables
-make test          # 22 tests
+make assistant     # optional: evaluate the SQL assistant on local models (needs Ollama)
+make test          # 55 tests
 make api           # http://127.0.0.1:8000/docs
 make dashboard     # http://127.0.0.1:8080
 ```
 
 ## Tests
 
-22 tests, run in CI with the linter:
+55 tests, run in CI with the linter:
 
 - **Cleaning rules** on hand-made rows: line classification, the duplicated sheet, one-to-one matching of reversed orders.
 - **Invariants on the real data:** row counts, reconciliations, RFM score ranges, cohort arithmetic.
@@ -168,6 +195,7 @@ make dashboard     # http://127.0.0.1:8080
 - **Models:** each beats its baseline; the stock simulation serves all demand with a perfect forecast and none with an empty one.
 - **API:** every endpoint, including unknown ids and invalid input.
 - **Lakehouse:** the Delta tables reconcile with the DuckDB warehouse.
+- **SQL assistant:** the guard rejects 16 kinds of unsafe statement and accepts ordinary queries; the connection cannot write or read files; every reference query runs; result comparison, self-repair, refusals and voting are tested with a scripted model, so no language model is needed in CI.
 
 ## Limitations
 
@@ -177,6 +205,7 @@ make dashboard     # http://127.0.0.1:8080
 - Recommendations are evaluated offline by hiding a product; that measures co-purchase, not whether a suggestion would change what a customer buys.
 - 13% of sales value has no customer id and is left out of customer analysis.
 - Results come from one random seed.
+- The SQL assistant is evaluated on 70 questions written for this warehouse by the author; it is a measure of this set-up, not a general benchmark.
 
 ## Author
 

@@ -42,3 +42,24 @@ def test_recommendations(client):
     assert scores == sorted(scores, reverse=True)
     assert client.post("/recommendations", json={"items": []}).status_code == 422
     assert client.post("/recommendations", json={"items": ["UNKNOWN"]}).json()["recommendations"] == []
+
+
+def test_ask_runs_a_checked_query_and_reports_refusals(conn, models):
+    class Scripted:
+        def __init__(self, *replies):
+            self.replies = list(replies)
+
+        def chat(self, messages):
+            return self.replies.pop(0)
+
+    def post(llm, question="How many customers are Champions?"):
+        with TestClient(create_app(conn, llm=llm)) as c:
+            return c.post("/ask", json={"question": question})
+
+    ok = post(Scripted("```sql\nSELECT count(*) AS n FROM mart_customer_rfm WHERE segment = 'Champions'\n```")).json()
+    assert ok["answered"] and ok["columns"] == ["n"] and ok["rows"][0][0] > 0 and "mart_customer_rfm" in ok["sql"]
+    blocked = post(Scripted("```sql\nDROP TABLE fact_sales\n```", "```sql\nDELETE FROM fact_sales\n```")).json()
+    assert not blocked["answered"] and "allowed" in blocked["reason"]
+    assert conn.execute("SELECT count(*) FROM fact_sales").fetchone()[0] > 1_000_000
+    assert not post(Scripted("CANNOT ANSWER"), "What is the weather?").json()["answered"]
+    assert post(Scripted(""), "x").status_code == 422

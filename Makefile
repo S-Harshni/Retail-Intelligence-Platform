@@ -13,6 +13,9 @@ pipeline:    ## warehouse -> analytics -> models -> docs/data/data.json
 lakehouse:   ## PySpark + Delta Lake bronze/silver/gold tables in data/lakehouse (needs Java 17)
 	$(PY) -m pip install -q -r requirements-lakehouse.txt && $(PY) -m retail.lakehouse
 
+assistant:   ## measure the text-to-SQL assistant with local models (needs Ollama); writes docs/data/assistant.json
+	$(PY) -m retail.assistant_eval
+
 test:
 	$(PY) -m pytest -q
 
@@ -25,4 +28,4 @@ api:         ## http://127.0.0.1:8000/docs (run `make pipeline` first)
 dashboard:   ## http://127.0.0.1:8080
 	$(PY) -m http.server 8080 -d docs
 
-.PHONY: install data pipeline lakehouse test lint api dashboard
+.PHONY: install data pipeline lakehouse assistant test lint api dashboard

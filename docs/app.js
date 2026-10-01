@@ -484,6 +484,65 @@ const TABS = {
         })));
   },
 
+  'Ask the data'(D) {
+    const a = D.assistant;
+    if (!a) return section(intro('The assistant results are not built yet: run python -m retail.assistant_eval.'));
+    const label = r => r.voted ? r.model : `${r.model}, ${r.prompt === 'few_shot' ? 'with examples' : 'no examples'}`;
+    const best = a.runs.find(r => r.model === a.best_model && r.prompt === 'few_shot'), V = a.voting;
+    const runs = [...a.runs, { model: `Voting across ${V.models.length} models`, prompt: 'few_shot', accuracy: V.accuracy, by_kind: V.by_kind, voted: true }].sort((x, y) => y.accuracy - x.accuracy);
+    const kindName = { lookup: 'Look-ups', ranking: 'Top-k', grouping: 'Group by', dates: 'Dates', join: 'Joins', analytic: 'Ratios, sub-queries, windows' };
+    const kinds = Object.keys(a.kinds);
+    let pick = a.examples[0];
+    const refs = Object.fromEntries(a.reference.map(r => [r.question, r.sql]));
+    const box = h('div', {});
+    const draw = () => {
+      const result = pick.error ? h('p', { class: 'sub', text: 'The query did not run: ' + pick.error })
+        : pick.sql == null ? h('p', { class: 'sub', text: 'The model declined to answer.' })
+        : h('div', { class: 'table-box' }, dataTable(pick.columns.map((c, i) => ({ label: c, key: i, num: typeof (pick.rows[0] || [])[i] === 'number', format: v => typeof v === 'number' ? nf.format(v) : v })), pick.rows),
+            pick.row_count > pick.rows.length ? h('p', { class: 'sub', text: `First ${pick.rows.length} of ${pick.row_count} rows.` }) : null);
+      box.replaceChildren(
+        h('p', {}, h('span', { class: pick.correct ? 'status' : 'status miss', text: pick.correct ? 'Same result as the reference query' : 'Different from the reference query' }),
+          pick.attempts > 1 ? h('span', { class: 'sub', text: `  after ${pick.attempts} attempts` }) : null),
+        h('h3', { text: 'Query written by the model' }), h('pre', { class: 'sql', text: pick.sql || '(none)' }), result,
+        h('h3', { text: 'Reference query' }), h('pre', { class: 'sql', text: refs[pick.question] }));
+    };
+    const select = h('select', { id: 'ask-question', onchange: e => { pick = a.examples[e.target.value]; draw(); } },
+      a.examples.map((e, i) => h('option', { value: i, text: `${e.correct ? '✓' : '✕'} ${e.question}` })));
+    draw();
+    return section(
+      intro(`Type a question, get a table. A language model writes one DuckDB query from the question and a description of ${a.tables.length} warehouse tables; the query is checked, run on a read-only connection, and shown to the model again if it fails. Accuracy is measured on ${a.questions} questions with hand-written reference queries: an answer counts only if the query returns the same table.`),
+      tiles([
+        ['Questions answered correctly', F.pct(V.accuracy), `three small models voting on the result; ${a.questions} questions`],
+        ['Best single model', F.pct(best.accuracy), `${a.best_model}; its query ran for ${F.pct(best.query_ran)}`],
+        ['Unanswerable requests answered anyway', String(best.answered_when_it_should_not), `of ${a.must_decline}: declined ${Math.round(best.declined_when_it_should * a.must_decline)}, stopped by the checks ${best.stopped_by_guard_or_database}`],
+        ['Models compared', String(new Set(a.runs.map(r => r.model)).size), a.runtime],
+      ]),
+      grid(
+        card({
+          title: 'Accuracy by model and prompt', sub: 'Share of questions where the model\'s query returns the same table as the reference query.',
+          table: { columns: [{ label: 'Model and prompt', key: 'name' }, { label: 'Correct', key: 'accuracy', num: true, format: F.pct }, { label: 'Correct on first try', key: 'accuracy_first_try', num: true, format: F.pct }, { label: 'Query ran', key: 'query_ran', num: true, format: F.pct }, { label: 'Declined when it should', key: 'declined_when_it_should', num: true, format: F.pct0 }], rows: runs.map(r => ({ ...r, name: label(r) })) },
+        }, p => hbars(p, { rows: runs.map(r => ({ label: label(r), values: [r.accuracy], extra: r.voted ? [] : [{ name: 'query ran', value: F.pct(r.query_ran) }] })), series: [{ name: 'Correct', color: C.actual }], format: F.pct, max: 1 })),
+        card({
+          title: 'Accuracy by kind of question', sub: 'Harder SQL is where a small model goes wrong, and where a second opinion helps most.',
+          legend: [{ name: 'Voting', color: C.actual }, { name: a.best_model, color: C.model }],
+          table: { columns: [{ label: 'Kind', key: 'kind' }, { label: 'Questions', key: 'n', num: true }, { label: 'Voting', key: 'voting', num: true, format: F.pct }, { label: a.best_model, key: 'accuracy', num: true, format: F.pct }], rows: kinds.map(k => ({ kind: kindName[k] || k, n: a.kinds[k], voting: V.by_kind[k], accuracy: best.by_kind[k] })) },
+        }, p => hbars(p, { rows: kinds.map(k => ({ label: `${kindName[k] || k} (${a.kinds[k]})`, values: [V.by_kind[k], best.by_kind[k]] })), series: [{ name: 'Voting', color: C.actual }, { name: a.best_model, color: C.model }], format: F.pct, max: 1 })),
+        h('figure', { class: 'card wide' },
+          h('div', { class: 'card-head' }, h('div', {}, h('h3', { text: 'Every test question, with the query the model wrote' }), h('p', { class: 'sub', text: `${a.best_model} with worked examples in the prompt. ✓ same result as the reference, ✕ different.` }))),
+          h('div', { class: 'control' }, h('label', { for: 'ask-question', text: 'Question' }), select), box),
+        card({
+          title: 'How a question is answered', wide: true,
+          table: { columns: [{ label: 'Step', key: 'step' }, { label: 'What happens', key: 'what' }], rows: [
+            { step: '1. Prompt', what: 'The question, a plain-language description of the tables, the business rules (what counts as a sale or an order) and six worked examples.' },
+            { step: '2. Check', what: 'The reply must be one SELECT statement over the published tables. Anything that writes, reads files or touches other tables is rejected before it reaches the database.' },
+            { step: '3. Run', what: 'The query runs on a read-only connection with external access switched off and a row limit, so a query that slipped past the check still could not change anything.' },
+            { step: '4. Repair', what: 'If the database reports an error, the model sees the message once and may correct the query.' },
+            { step: '5. Vote', what: `Optionally the question goes to ${V.models.length} models (${V.models.join(', ')}). Every candidate query is run, and the result most of them agree on is returned: two models rarely make the same mistake.` },
+          ] },
+          notes: ['The prompt rules were revised once after a first run on these questions, so the figures are somewhat optimistic for questions nobody has seen.', 'A query that runs is not a query that is right: the gap between the two is why the generated SQL is always shown next to the answer.'],
+        })));
+  },
+
   'Data quality'(D) {
     const q = D.quality;
     const kinds = [
@@ -524,8 +583,9 @@ const TABS = {
 // ---------- page ----------
 (async function main() {
   const D = await (await fetch('data/data.json')).json();
+  D.assistant = await fetch('data/assistant.json').then(r => r.ok ? r.json() : null).catch(() => null);
   document.getElementById('lede').textContent =
-    `${F.int(D.quality.raw_rows)} real transactions from a UK online retailer, turned into a SQL warehouse, customer and returns analysis, demand forecasts, a stock simulation and product recommendations.`;
+    `${F.int(D.quality.raw_rows)} real transactions from a UK online retailer, turned into a SQL warehouse, customer and returns analysis, demand forecasts, a stock simulation, product recommendations and a text-to-SQL assistant.`;
   document.getElementById('foot').textContent =
     `Data: ${D.source.name}, ${D.source.publisher}, ${D.source.licence} (doi:${D.source.doi}). Amounts are in pounds sterling. Built by S Harshni.`;
 
