@@ -3,6 +3,7 @@
 ![tests](https://github.com/S-Harshni/Retail-Intelligence-Platform/actions/workflows/ci.yml/badge.svg)
 ![python](https://img.shields.io/badge/python-3.12-blue)
 ![sql](https://img.shields.io/badge/SQL-DuckDB-yellow)
+![spark](https://img.shields.io/badge/PySpark-Delta_Lake-orange)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 One million real retail transactions turned into a SQL warehouse, customer and returns analysis, a repeat-purchase model, demand forecasts, a stock simulation and product recommendations, served by an API and a dashboard.
@@ -109,6 +110,20 @@ Item-to-item cosine similarity over order baskets, built from orders before 1 Se
 
 ![Recommendations](docs/img/recommendations.png)
 
+## Lakehouse version (PySpark and Delta Lake)
+
+[`lakehouse.py`](src/retail/lakehouse.py) rebuilds the warehouse as a medallion lakehouse with **PySpark** jobs writing **Delta Lake** tables:
+
+| Layer | Table | Rows | What it holds |
+| --- | --- | ---: | --- |
+| Bronze | `invoice_lines` | 1,067,371 | The source as published, appended one sheet per batch (two table versions), with load time |
+| Silver | `invoice_lines` | 1,044,848 | Typed, de-duplicated and classified lines, partitioned by line type |
+| Gold | `monthly_sales` | 25 | Sales, orders and returned value by month |
+| Gold | `product_weekly` | 196,144 | Weekly units, sales and orders per product |
+| Gold | `customer_value` | 5,852 | Orders, last order date and net spend per customer |
+
+The cleaning rules are the same as the SQL staging step, written with the DataFrame API. A test builds both and checks that they agree: the same line counts by type, the same customers, and monthly revenue equal to the penny (£19,699,784.97 in total). Run it with `make lakehouse` (needs Java 17).
+
 ## Architecture
 
 ```
@@ -137,20 +152,22 @@ Model outputs are written back into the warehouse (`ml_customer_score`, `ml_fore
 ```bash
 make install       # virtual environment and dependencies
 make pipeline      # builds the warehouse, runs the models, writes docs/data/data.json (about a minute)
-make test          # 21 tests
+make lakehouse     # optional: PySpark + Delta Lake bronze/silver/gold tables
+make test          # 22 tests
 make api           # http://127.0.0.1:8000/docs
 make dashboard     # http://127.0.0.1:8080
 ```
 
 ## Tests
 
-21 tests, run in CI with the linter:
+22 tests, run in CI with the linter:
 
 - **Cleaning rules** on hand-made rows: line classification, the duplicated sheet, one-to-one matching of reversed orders.
 - **Invariants on the real data:** row counts, reconciliations, RFM score ranges, cohort arithmetic.
 - **No look-ahead:** changing future weeks leaves a week's forecast features unchanged; customer features stop at the cut-off.
 - **Models:** each beats its baseline; the stock simulation serves all demand with a perfect forecast and none with an empty one.
 - **API:** every endpoint, including unknown ids and invalid input.
+- **Lakehouse:** the Delta tables reconcile with the DuckDB warehouse.
 
 ## Limitations
 

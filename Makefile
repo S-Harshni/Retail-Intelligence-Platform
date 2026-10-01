@@ -10,6 +10,9 @@ data:        ## rebuild data/online_retail_ii.parquet from the UCI archive (the 
 pipeline:    ## warehouse -> analytics -> models -> docs/data/data.json
 	$(PY) -m retail.pipeline
 
+lakehouse:   ## PySpark + Delta Lake bronze/silver/gold tables in data/lakehouse (needs Java 17)
+	$(PY) -m pip install -q -r requirements-lakehouse.txt && $(PY) -m retail.lakehouse
+
 test:
 	$(PY) -m pytest -q
 
@@ -22,4 +25,4 @@ api:         ## http://127.0.0.1:8000/docs (run `make pipeline` first)
 dashboard:   ## http://127.0.0.1:8080
 	$(PY) -m http.server 8080 -d docs
 
-.PHONY: install data pipeline test lint api dashboard
+.PHONY: install data pipeline lakehouse test lint api dashboard
